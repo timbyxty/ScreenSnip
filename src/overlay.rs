@@ -6,10 +6,8 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
-use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{CursorIcon, Window, WindowLevel};
 
 use crate::capture::Composite;
@@ -37,16 +35,24 @@ impl Overlay {
         // Окно создаём СКРЫТЫМ: сначала отключим анимацию переходов и нарисуем
         // первый кадр, и только потом покажем — чтобы оверлей появлялся мгновенно,
         // без «выезда из центра» и без анимации закрытия.
-        let attrs = Window::default_attributes()
+        // `mut` нужен только под Windows (для with_skip_taskbar ниже).
+        #[allow(unused_mut)]
+        let mut attrs = Window::default_attributes()
             .with_title("ScreenSnip")
             .with_decorations(false)
             .with_resizable(false)
             .with_transparent(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_skip_taskbar(true)
             .with_position(PhysicalPosition::new(comp.origin_x, comp.origin_y))
             .with_inner_size(PhysicalSize::new(comp.width, comp.height))
             .with_visible(false);
+
+        // Не показывать оверлей в панели задач (только Windows).
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_skip_taskbar(true);
+        }
 
         let window = Rc::new(event_loop.create_window(attrs)?);
         window.set_cursor(CursorIcon::Crosshair);
@@ -209,9 +215,11 @@ impl Overlay {
     }
 }
 
-/// Отключает анимации переходов окна (открытие/закрытие/сворачивание) через DWM,
-/// чтобы оверлей появлялся и исчезал мгновенно.
+/// Отключает анимации переходов окна (открытие/закрытие) через DWM, чтобы оверлей
+/// появлялся и исчезал мгновенно. На не-Windows платформах — заглушка.
+#[cfg(windows)]
 fn disable_window_transitions(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
@@ -232,6 +240,9 @@ fn disable_window_transitions(window: &Window) {
         }
     }
 }
+
+#[cfg(not(windows))]
+fn disable_window_transitions(_window: &Window) {}
 
 /// Заливает прямоугольник сплошным цветом.
 fn fill_rect(buf: &mut [u32], stride: usize, x: i32, y: i32, bw: i32, bh: i32, color: u32) {

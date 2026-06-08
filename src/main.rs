@@ -26,6 +26,12 @@ use config::Config;
 use hotkey_ui::HotkeyCapture;
 use overlay::Overlay;
 
+// Фиксированные идентификаторы пунктов меню — одинаковые на всех платформах,
+// чтобы не передавать их между потоками (на Linux меню строится в gtk-потоке).
+const ID_CHANGE: &str = "change_hotkey";
+const ID_OPEN: &str = "open_config";
+const ID_QUIT: &str = "quit";
+
 /// События, доставляемые в event loop из фоновых потоков.
 #[derive(Debug)]
 enum UserEvent {
@@ -44,10 +50,8 @@ struct App {
     hotkeys: GlobalHotKeyManager,
     /// Текущий зарегистрированный хоткей (нужен, чтобы снять при смене).
     current_hotkey: HotKey,
+    // На Windows иконка трея живёт здесь; на Linux — в отдельном gtk-потоке.
     tray: Option<TrayIcon>,
-    change_id: Option<MenuId>,
-    open_id: Option<MenuId>,
-    quit_id: Option<MenuId>,
     cfg: Config,
 }
 
@@ -59,9 +63,6 @@ impl App {
             hotkeys,
             current_hotkey,
             tray: None,
-            change_id: None,
-            open_id: None,
-            quit_id: None,
             cfg,
         }
     }
@@ -233,15 +234,12 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // Иконку в трее создаём один раз, уже внутри запущенного event loop.
+        // На Windows иконку трея создаём один раз, уже внутри запущенного event loop.
+        // На Linux она создаётся в отдельном gtk-потоке (см. main), здесь ничего не делаем.
+        #[cfg(windows)]
         if self.tray.is_none() {
-            match build_tray(&self.cfg) {
-                Ok((tray, change_id, open_id, quit_id)) => {
-                    self.tray = Some(tray);
-                    self.change_id = Some(change_id);
-                    self.open_id = Some(open_id);
-                    self.quit_id = Some(quit_id);
-                }
+            match make_tray() {
+                Ok(tray) => self.tray = Some(tray),
                 Err(e) => eprintln!("Не удалось создать иконку в трее: {e}"),
             }
         }
@@ -252,11 +250,11 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Hotkey => self.open_overlay(event_loop),
             UserEvent::TrayClick => self.open_capture(event_loop),
             UserEvent::Menu(id) => {
-                if self.quit_id.as_ref() == Some(&id) {
+                if id == MenuId::new(ID_QUIT) {
                     event_loop.exit();
-                } else if self.change_id.as_ref() == Some(&id) {
+                } else if id == MenuId::new(ID_CHANGE) {
                     self.open_capture(event_loop);
-                } else if self.open_id.as_ref() == Some(&id) {
+                } else if id == MenuId::new(ID_OPEN) {
                     open_config_file();
                 }
             }
@@ -285,32 +283,24 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// Создаёт иконку в трее с меню и возвращает идентификаторы пунктов.
-fn build_tray(cfg: &Config) -> Result<(TrayIcon, MenuId, MenuId, MenuId)> {
+/// Создаёт иконку в трее с меню (с фиксированными ID пунктов).
+fn make_tray() -> Result<TrayIcon> {
     let menu = Menu::new();
-    let change_item = MenuItem::new("Изменить хоткей…", true, None);
-    let open_item = MenuItem::new("Открыть конфиг", true, None);
-    let quit_item = MenuItem::new("Выход", true, None);
-    menu.append(&change_item)?;
-    menu.append(&open_item)?;
+    menu.append(&MenuItem::with_id(ID_CHANGE, "Изменить хоткей…", true, None))?;
+    menu.append(&MenuItem::with_id(ID_OPEN, "Открыть конфиг", true, None))?;
     menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&quit_item)?;
+    menu.append(&MenuItem::with_id(ID_QUIT, "Выход", true, None))?;
 
     let (rgba, w, h) = make_icon();
     let icon = tray_icon::Icon::from_rgba(rgba, w, h)?;
 
     let tray = TrayIconBuilder::new()
-        .with_tooltip(format!("ScreenSnip — {}", cfg.hotkey))
+        .with_tooltip("ScreenSnip")
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .build()?;
 
-    Ok((
-        tray,
-        change_item.id().clone(),
-        open_item.id().clone(),
-        quit_item.id().clone(),
-    ))
+    Ok(tray)
 }
 
 /// Простая иконка 32×32: синий квадрат с белой рамкой.
@@ -333,11 +323,15 @@ fn make_icon() -> (Vec<u8>, u32, u32) {
 
 /// Открывает файл конфигурации в редакторе по умолчанию.
 fn open_config_file() {
-    if let Ok(path) = config::config_path() {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .spawn();
-    }
+    let Ok(path) = config::config_path() else {
+        return;
+    };
+    #[cfg(windows)]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &path.to_string_lossy()])
+        .spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
 }
 
 fn main() -> Result<()> {
@@ -410,6 +404,25 @@ fn main() -> Result<()> {
             }
         });
     }
+
+    // На Linux иконка трея должна жить в потоке с запущенным gtk-циклом.
+    // События меню/кликов всё равно приходят в глобальные каналы (мосты выше),
+    // поэтому здесь достаточно создать иконку и крутить gtk::main().
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        if let Err(e) = gtk::init() {
+            eprintln!("Не удалось инициализировать gtk для трея: {e}");
+            return;
+        }
+        let _tray = match make_tray() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Не удалось создать иконку в трее: {e}");
+                return;
+            }
+        };
+        gtk::main();
+    });
 
     let mut app = App::new(hotkeys, hotkey, cfg);
     event_loop.run_app(&mut app)?;

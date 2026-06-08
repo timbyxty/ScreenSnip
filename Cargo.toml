@@ -29,10 +29,22 @@ directories = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
+
+# --- Windows ---
+[target.'cfg(windows)'.dependencies]
 # Именованный мьютекс single-instance + отключение DWM-анимаций окна оверлея
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_Graphics_Dwm"] }
 # Доступ к нативному HWND окна winit
 raw-window-handle = "0.6"
+
+# --- Linux ---
+[target.'cfg(target_os = "linux")'.dependencies]
+# Нужен для запуска gtk-цикла, в котором живёт иконка в трее (требование tray-icon)
+gtk = "0.18"
+
+# --- Unix (single-instance через файловую блокировку) ---
+[target.'cfg(unix)'.dependencies]
+fs2 = "0.4"
 
 [profile.release]
 opt-level = 3

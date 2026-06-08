@@ -162,6 +162,41 @@ makensis -DSRCEXE=$PWD/dist/screensnip.exe \
 
 ---
 
+## Linux (X11)
+
+Программа кросс-платформенная и работает на **Linux под X11**. Логика та же: хоткей →
+заморозка → выделение → буфер; есть иконка в трее (изменить хоткей / выход).
+
+**Поддерживается:**
+- Сессия **X11** (`echo $XDG_SESSION_TYPE` → `x11`). Под **Wayland** глобальный хоткей
+  не работает (ограничение протокола) — нужен X11-сеанс.
+- Трей: окружения со штатным System Tray — **KDE, XFCE, Cinnamon, MATE**. В **GNOME**
+  трея по умолчанию нет — поставьте расширение **AppIndicator**, иначе иконка не появится
+  (хоткей при этом всё равно работает, но управлять и выходить придётся через конфиг/`kill`).
+
+**Сборка:**
+
+```bash
+# Зависимости (Debian/Ubuntu); на других дистрибутивах — аналоги
+sudo apt-get install -y \
+  libgtk-3-dev libxdo-dev libayatana-appindicator3-dev \
+  libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libpipewire-0.3-dev libgbm-dev libegl-dev libdrm-dev
+
+cargo build --release
+# бинарник: target/release/screensnip
+```
+
+**Автозапуск** на Linux — через `~/.config/autostart/screensnip.desktop` (создаётся
+приложением, если `autostart = true`). Конфиг: `~/.config/ScreenSnip/config.toml`.
+
+**Особенность буфера обмена (X11).** В отличие от Windows, на X11 содержимое буфера
+«живёт» в процессе-владельце. Пока ScreenSnip висит в трее — скопированная картинка
+доступна; если скопировать и сразу выйти, она пропадёт (если только её не подхватил
+менеджер буфера обмена вроде Klipper/CopyQ). Для постоянной работы держите программу в трее.
+
+---
+
 ## Замечания
 
 - **DPI.** Код рассчитан на одинаковый масштаб на всех мониторах. При смешанном
