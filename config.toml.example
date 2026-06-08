@@ -1,0 +1,9 @@
+# Пример конфигурации ScreenSnip.
+# Реальный файл создаётся автоматически в %APPDATA%\ScreenSnip\ScreenSnip\config.toml
+
+# Горячая клавиша: модификаторы (Ctrl/Shift/Alt/Win) + клавиша.
+# Примеры: "Ctrl+Shift+S", "Alt+PrintScreen", "Ctrl+F8".
+hotkey = "Ctrl+Shift+S"
+
+# Запускать при входе в Windows.
+autostart = true

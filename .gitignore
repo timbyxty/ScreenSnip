@@ -1,0 +1,13 @@
+# Сборка Rust
+/target
+
+# Собранные бинарники и установщик
+/dist
+
+# Артефакты компиляции Inno Setup
+installer/output
+
+# Локальные настройки Claude Code
+.claude/settings.local.json
+
+# Cargo.lock для бинарного приложения КОММИТИТСЯ (не игнорируем).

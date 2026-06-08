@@ -1,0 +1,42 @@
+[package]
+name = "screensnip"
+version = "0.1.0"
+edition = "2021"
+description = "Скриншот выбранной области в буфер обмена по горячей клавише (с заморозкой экрана)"
+
+[[bin]]
+name = "screensnip"
+path = "src/main.rs"
+
+[dependencies]
+# Оконная система и event loop
+winit = "0.30"
+# Программный рендер замороженного скриншота в окно оверлея
+softbuffer = "0.4"
+# Захват экрана (всех мониторов)
+xcap = "0.9"
+# Запись изображения в буфер обмена
+arboard = "3.4"
+# Глобальный хоткей (WinAPI RegisterHotKey под капотом)
+global-hotkey = "0.6"
+# Иконка в системном трее + меню
+tray-icon = "0.19"
+# Автозапуск через HKCU\...\Run
+auto-launch = "0.5"
+# Путь к каталогу конфигурации (%APPDATA%)
+directories = "5"
+# Конфиг
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+# Именованный мьютекс single-instance + отключение DWM-анимаций окна оверлея
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_Graphics_Dwm"] }
+# Доступ к нативному HWND окна winit
+raw-window-handle = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
