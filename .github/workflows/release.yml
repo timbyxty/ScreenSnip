@@ -20,9 +20,11 @@ jobs:
       - name: Build (MSVC)
         run: cargo build --release
       - name: Build NSIS installer
+        shell: pwsh
         run: |
           choco install nsis -y --no-progress
-          & "C:\Program Files (x86)\NSIS\makensis.exe" /DSRCEXE=target\release\screensnip.exe /DOUTFILE=ScreenSnip-Setup.exe installer\screensnip.nsi
+          # NSIS резолвит File относительно папки скрипта — передаём АБСОЛЮТНЫЕ пути.
+          & "C:\Program Files (x86)\NSIS\makensis.exe" "/DSRCEXE=$env:GITHUB_WORKSPACE\target\release\screensnip.exe" "/DOUTFILE=$env:GITHUB_WORKSPACE\ScreenSnip-Setup.exe" "$env:GITHUB_WORKSPACE\installer\screensnip.nsi"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
