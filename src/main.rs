@@ -7,8 +7,6 @@ mod config;
 mod font;
 mod hotkey_ui;
 mod overlay;
-#[cfg(target_os = "linux")]
-mod overlay_wayland;
 mod single_instance;
 
 use std::borrow::Cow;
@@ -439,14 +437,6 @@ fn run_cli(cli: Cli) -> Result<()> {
                 bytes: Cow::Owned(rgba),
             })?;
         }
-        return Ok(());
-    }
-
-    // Wayland: нативный оверлей через layer-shell
-    #[cfg(target_os = "linux")]
-    if capture::is_wayland() {
-        let mut overlay = overlay_wayland::OverlayWayland::new(comp, cli.output.map(PathBuf::from))?;
-        overlay.run()?;
         return Ok(());
     }
 
