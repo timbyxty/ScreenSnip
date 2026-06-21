@@ -1,15 +1,21 @@
-// Без консольного окна в релизе.
 #![windows_subsystem = "windows"]
 
 mod autostart;
 mod capture;
+mod cli;
 mod config;
 mod font;
 mod hotkey_ui;
 mod overlay;
+#[cfg(target_os = "linux")]
+mod overlay_wayland;
 mod single_instance;
 
-use anyhow::Result;
+use std::borrow::Cow;
+use std::path::PathBuf;
+
+use anyhow::{anyhow, Result};
+use image::ImageEncoder;
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -22,35 +28,27 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::WindowId;
 
+use cli::Cli;
 use config::Config;
 use hotkey_ui::HotkeyCapture;
 use overlay::Overlay;
 
-// Фиксированные идентификаторы пунктов меню — одинаковые на всех платформах,
-// чтобы не передавать их между потоками (на Linux меню строится в gtk-потоке).
 const ID_CHANGE: &str = "change_hotkey";
 const ID_OPEN: &str = "open_config";
 const ID_QUIT: &str = "quit";
 
-/// События, доставляемые в event loop из фоновых потоков.
 #[derive(Debug)]
 enum UserEvent {
-    /// Нажата глобальная горячая клавиша.
     Hotkey,
-    /// Выбран пункт меню в трее.
     Menu(MenuId),
-    /// Левый клик по иконке в трее.
     TrayClick,
 }
 
 struct App {
     overlay: Option<Overlay>,
     capture: Option<HotkeyCapture>,
-    // Менеджер хоткеев держим живым всё время (иначе хоткей снимется).
     hotkeys: GlobalHotKeyManager,
-    /// Текущий зарегистрированный хоткей (нужен, чтобы снять при смене).
     current_hotkey: HotKey,
-    // На Windows иконка трея живёт здесь; на Linux — в отдельном gtk-потоке.
     tray: Option<TrayIcon>,
     cfg: Config,
 }
@@ -68,7 +66,6 @@ impl App {
     }
 
     fn open_overlay(&mut self, event_loop: &ActiveEventLoop) {
-        // Не открываем во время настройки хоткея и повторно.
         if self.overlay.is_some() || self.capture.is_some() {
             return;
         }
@@ -101,7 +98,6 @@ impl App {
         }
     }
 
-    /// Применяет новую комбинацию: перерегистрирует хоткей вживую и сохраняет конфиг.
     fn apply_new_hotkey(&mut self, s: String) {
         let new = match config::parse_hotkey(&s) {
             Ok(h) => h,
@@ -112,7 +108,6 @@ impl App {
                 return;
             }
         };
-        // Снимаем старый и ставим новый.
         let _ = self.hotkeys.unregister(self.current_hotkey);
         match self.hotkeys.register(new) {
             Ok(()) => {
@@ -124,10 +119,9 @@ impl App {
                 if let Some(t) = &self.tray {
                     let _ = t.set_tooltip(Some(format!("ScreenSnip — {s}")));
                 }
-                self.capture = None; // успех — закрываем окно
+                self.capture = None;
             }
             Err(e) => {
-                // Откат на старый хоткей, окно остаётся открытым.
                 let _ = self.hotkeys.register(self.current_hotkey);
                 if let Some(c) = self.capture.as_ref() {
                     c.set_error(&format!("«{s}» недоступна ({e}) — попробуйте другую"));
@@ -210,7 +204,6 @@ impl App {
                     },
                 ..
             } => {
-                // Esc — отмена настройки.
                 if matches!(logical_key, Key::Named(NamedKey::Escape)) {
                     self.capture = None;
                     return;
@@ -234,8 +227,6 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // На Windows иконку трея создаём один раз, уже внутри запущенного event loop.
-        // На Linux она создаётся в отдельном gtk-потоке (см. main), здесь ничего не делаем.
         #[cfg(windows)]
         if self.tray.is_none() {
             match make_tray() {
@@ -283,7 +274,6 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// Создаёт иконку в трее с меню (с фиксированными ID пунктов).
 fn make_tray() -> Result<TrayIcon> {
     let menu = Menu::new();
     menu.append(&MenuItem::with_id(ID_CHANGE, "Изменить хоткей…", true, None))?;
@@ -303,25 +293,19 @@ fn make_tray() -> Result<TrayIcon> {
     Ok(tray)
 }
 
-/// Простая иконка 32×32: синий квадрат с белой рамкой.
 fn make_icon() -> (Vec<u8>, u32, u32) {
     const S: u32 = 32;
     let mut rgba = Vec::with_capacity((S * S * 4) as usize);
     for y in 0..S {
         for x in 0..S {
             let border = x < 2 || y < 2 || x >= S - 2 || y >= S - 2;
-            let (r, g, b) = if border {
-                (255, 255, 255)
-            } else {
-                (0x2D, 0x9C, 0xDB)
-            };
+            let (r, g, b) = if border { (255, 255, 255) } else { (0x2D, 0x9C, 0xDB) };
             rgba.extend_from_slice(&[r, g, b, 255]);
         }
     }
     (rgba, S, S)
 }
 
-/// Открывает файл конфигурации в редакторе по умолчанию.
 fn open_config_file() {
     let Ok(path) = config::config_path() else {
         return;
@@ -334,8 +318,163 @@ fn open_config_file() {
     let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
 }
 
-fn main() -> Result<()> {
-    // Если уже запущена другая копия — тихо выходим (иначе два трея и конфликт хоткея).
+// ============================================================================
+// CLI overlay app — упрощённый event loop для режима --region
+// ============================================================================
+
+struct CliApp {
+    overlay: Option<Overlay>,
+    comp: Option<capture::Composite>,
+    save_path: Option<PathBuf>,
+}
+
+impl ApplicationHandler for CliApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let Some(comp) = self.comp.take() else {
+            event_loop.exit();
+            return;
+        };
+        match Overlay::with_output(event_loop, comp, self.save_path.clone()) {
+            Ok(overlay) => {
+                overlay.window.request_redraw();
+                self.overlay = Some(overlay);
+            }
+            Err(e) => {
+                eprintln!("Ошибка создания оверлея: {e}");
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let is_overlay = self
+            .overlay
+            .as_ref()
+            .map_or(false, |o| o.window.id() == window_id);
+        if !is_overlay {
+            return;
+        }
+
+        match event {
+            WindowEvent::RedrawRequested => {
+                if let Some(o) = self.overlay.as_mut() {
+                    if let Err(e) = o.render() {
+                        eprintln!("Ошибка отрисовки: {e}");
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(o) = self.overlay.as_mut() {
+                    o.on_cursor_moved(position.x, position.y);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => match (button, state) {
+                (MouseButton::Left, ElementState::Pressed) => {
+                    if let Some(o) = self.overlay.as_mut() {
+                        o.on_left_press();
+                    }
+                }
+                (MouseButton::Left, ElementState::Released) => {
+                    let result = self.overlay.as_mut().map(|o| o.on_left_release());
+                    let done = match result {
+                        Some(Ok(true)) => true,
+                        Some(Ok(false)) => false,
+                        Some(Err(e)) => {
+                            eprintln!("Ошибка: {e}");
+                            true
+                        }
+                        None => false,
+                    };
+                    if done {
+                        event_loop.exit();
+                    }
+                }
+                (MouseButton::Right, ElementState::Pressed) => event_loop.exit(),
+                _ => {}
+            },
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Escape),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => event_loop.exit(),
+            WindowEvent::CloseRequested => event_loop.exit(),
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
+// CLI mode: --fullscreen / --region
+// ============================================================================
+
+fn run_cli(cli: Cli) -> Result<()> {
+    if cli.delay > 0 {
+        std::thread::sleep(std::time::Duration::from_secs(cli.delay as u64));
+    }
+
+    let comp = capture::capture_all()?;
+
+    if cli.fullscreen {
+        let (rgba, w, h) = comp.crop_rgba(0, 0, comp.width, comp.height);
+        if let Some(ref path) = cli.output {
+            save_png(path, &rgba, w, h)?;
+        }
+        if cli.clipboard || cli.output.is_none() {
+            let mut clipboard = arboard::Clipboard::new()?;
+            clipboard.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: Cow::Owned(rgba),
+            })?;
+        }
+        return Ok(());
+    }
+
+    // Wayland: нативный оверлей через layer-shell
+    #[cfg(target_os = "linux")]
+    if capture::is_wayland() {
+        let mut overlay = overlay_wayland::OverlayWayland::new(comp, cli.output.map(PathBuf::from))?;
+        overlay.run()?;
+        return Ok(());
+    }
+
+    // X11 / Windows: winit-based overlay
+    let event_loop = EventLoop::<()>::with_user_event().build()?;
+    let mut app = CliApp {
+        overlay: None,
+        comp: Some(comp),
+        save_path: cli.output.map(PathBuf::from),
+    };
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<()> {
+    let file = std::fs::File::create(path)?;
+    let encoder = image::codecs::png::PngEncoder::new(file);
+    encoder
+        .write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
+        .map_err(|e| anyhow!("png encode: {e}"))?;
+    Ok(())
+}
+
+// ============================================================================
+// Daemon mode (tray + hotkey) — как было
+// ============================================================================
+
+fn run_daemon() -> Result<()> {
     if !single_instance::acquire() {
         return Ok(());
     }
@@ -345,12 +484,10 @@ fn main() -> Result<()> {
         Config::default()
     });
 
-    // Автозапуск (управляется только приложением, не инсталлятором).
     if let Err(e) = autostart::apply(cfg.autostart) {
         eprintln!("Не удалось настроить автозапуск: {e}");
     }
 
-    // Регистрация глобального хоткея.
     let hotkey = config::parse_hotkey(&cfg.hotkey).unwrap_or_else(|e| {
         eprintln!("Ошибка в хоткее ({e}), использую Ctrl+Shift+S");
         config::parse_hotkey("Ctrl+Shift+S").unwrap()
@@ -358,14 +495,10 @@ fn main() -> Result<()> {
     let hotkeys = GlobalHotKeyManager::new()?;
     hotkeys.register(hotkey)?;
 
-    // Event loop с пользовательскими событиями.
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
 
-    // Мост: горячая клавиша -> пробуждение event loop.
-    // receiver() отдаёт &'static mpsc::Receiver (не Clone, не Sync), поэтому
-    // получаем ссылку уже ВНУТРИ потока и блокирующе ждём событий.
     {
         let proxy = proxy.clone();
         std::thread::spawn(move || {
@@ -377,7 +510,6 @@ fn main() -> Result<()> {
             }
         });
     }
-    // Мост: пункты меню трея -> event loop.
     {
         let proxy = proxy.clone();
         std::thread::spawn(move || {
@@ -387,7 +519,6 @@ fn main() -> Result<()> {
             }
         });
     }
-    // Мост: клики по иконке трея -> event loop (левый клик открывает настройку).
     {
         let proxy = proxy.clone();
         std::thread::spawn(move || {
@@ -405,9 +536,6 @@ fn main() -> Result<()> {
         });
     }
 
-    // На Linux иконка трея должна жить в потоке с запущенным gtk-циклом.
-    // События меню/кликов всё равно приходят в глобальные каналы (мосты выше),
-    // поэтому здесь достаточно создать иконку и крутить gtk::main().
     #[cfg(target_os = "linux")]
     std::thread::spawn(|| {
         if let Err(e) = gtk::init() {
@@ -427,4 +555,18 @@ fn main() -> Result<()> {
     let mut app = App::new(hotkeys, hotkey, cfg);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+fn main() -> Result<()> {
+    let cli = <Cli as clap::Parser>::parse();
+
+    if cli.is_cli_mode() {
+        run_cli(cli)
+    } else {
+        run_daemon()
+    }
 }

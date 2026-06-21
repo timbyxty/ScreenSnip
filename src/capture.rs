@@ -1,11 +1,20 @@
 //! Захват всех мониторов и склейка их в единый буфер размером с виртуальный экран.
 //!
-//! Предполагается одинаковый масштаб (DPI) на всех мониторах — тогда координаты
-//! мониторов и захваченные пиксели находятся в одной физической системе координат,
-//! и склейка по смещениям даёт пиксельно точный результат.
+//! Поддерживается два бэкенда:
+//! - X11 / Windows: `xcap`
+//! - Wayland (Linux): `libwayshot` (wlr-screencopy)
 
 use anyhow::{anyhow, Result};
-use xcap::Monitor;
+
+/// Прямоугольник одного физического выхода (монитора).
+/// Координаты — в пикселях виртуального рабочего стола.
+#[derive(Debug, Clone, Copy)]
+pub struct OutputRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
 
 /// Замороженный снимок всего виртуального рабочего стола.
 pub struct Composite {
@@ -20,6 +29,8 @@ pub struct Composite {
     /// (может быть отрицательным при наличии мониторов слева/сверху от основного).
     pub origin_x: i32,
     pub origin_y: i32,
+    /// Прямоугольники отдельных мониторов (для оверлея на Wayland).
+    pub outputs: Vec<OutputRect>,
 }
 
 impl Composite {
@@ -35,10 +46,10 @@ impl Composite {
             let row = y as usize * stride;
             for x in x0..x1 {
                 let p = self.bright[row + x as usize];
-                out.push(((p >> 16) & 0xFF) as u8); // R
-                out.push(((p >> 8) & 0xFF) as u8); // G
-                out.push((p & 0xFF) as u8); // B
-                out.push(0xFF); // A
+                out.push(((p >> 16) & 0xFF) as u8);
+                out.push(((p >> 8) & 0xFF) as u8);
+                out.push((p & 0xFF) as u8);
+                out.push(0xFF);
             }
         }
         (out, w, h)
@@ -47,21 +58,41 @@ impl Composite {
 
 /// Затемняет пиксель 0RGB до ~40% яркости.
 #[inline]
-fn dim(p: u32) -> u32 {
+pub(crate) fn dim(p: u32) -> u32 {
     let r = (((p >> 16) & 0xFF) * 40 / 100) << 16;
     let g = (((p >> 8) & 0xFF) * 40 / 100) << 8;
     let b = (p & 0xFF) * 40 / 100;
     r | g | b
 }
 
-/// Захватывает все мониторы и собирает единый замороженный снимок.
+/// Определяет, запущены ли мы под Wayland (по переменным окружения).
+#[cfg(target_os = "linux")]
+pub fn is_wayland() -> bool {
+    std::env::var("WAYLAND_DISPLAY").is_ok()
+        || std::env::var("XDG_SESSION_TYPE").map_or(false, |v| v == "wayland")
+}
+
+/// Захватывает весь виртуальный рабочий стол. Автоматически выбирает бэкенд.
 pub fn capture_all() -> Result<Composite> {
+    #[cfg(target_os = "linux")]
+    if is_wayland() {
+        return capture_wayland();
+    }
+    capture_x11()
+}
+
+// ============================================================================
+// Бэкенд X11 / Windows (через xcap)
+// ============================================================================
+
+fn capture_x11() -> Result<Composite> {
+    use xcap::Monitor;
+
     let monitors = Monitor::all().map_err(|e| anyhow!("не удалось перечислить мониторы: {e}"))?;
     if monitors.is_empty() {
         return Err(anyhow!("не найдено ни одного монитора"));
     }
 
-    // Границы виртуального экрана.
     let mut min_x = i32::MAX;
     let mut min_y = i32::MAX;
     let mut max_x = i32::MIN;
@@ -85,7 +116,6 @@ pub fn capture_all() -> Result<Composite> {
     for m in &monitors {
         let mx = m.x()?;
         let my = m.y()?;
-        // Захват одного монитора: image::RgbaImage (RGBA, построчно).
         let img = m
             .capture_image()
             .map_err(|e| anyhow!("не удалось захватить монитор: {e}"))?;
@@ -116,6 +146,17 @@ pub fn capture_all() -> Result<Composite> {
         }
     }
 
+    let outputs: Vec<OutputRect> = monitors
+        .iter()
+        .filter_map(|m| {
+            let x = m.x().ok()?;
+            let y = m.y().ok()?;
+            let w = m.width().ok()?;
+            let h = m.height().ok()?;
+            Some(OutputRect { x, y, w, h })
+        })
+        .collect();
+
     let dimmed = bright.iter().map(|&p| dim(p)).collect();
 
     Ok(Composite {
@@ -125,5 +166,71 @@ pub fn capture_all() -> Result<Composite> {
         height: vh,
         origin_x: min_x,
         origin_y: min_y,
+        outputs,
+    })
+}
+
+// ============================================================================
+// Бэкенд Wayland (через libwayshot / wlr-screencopy)
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+fn capture_wayland() -> Result<Composite> {
+    use libwayshot::WayshotConnection;
+
+    let wayshot = WayshotConnection::new().map_err(|e| anyhow!("Wayland захват: {e}"))?;
+
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for output in wayshot.get_all_outputs() {
+        let x = output.logical_region.inner.position.x;
+        let y = output.logical_region.inner.position.y;
+        let w = output.physical_size.width;
+        let h = output.physical_size.height;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x + w as i32);
+        max_y = max_y.max(y + h as i32);
+    }
+
+    let img = wayshot
+        .screenshot_all(true)
+        .map_err(|e| anyhow!("screenshot_all: {e}"))?;
+
+    let rgba = img.to_rgba8();
+    let iw = rgba.width();
+    let ih = rgba.height();
+    let raw = rgba.into_raw();
+
+    let bright: Vec<u32> = raw
+        .chunks_exact(4)
+        .map(|p| (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32)
+        .collect();
+
+    let outputs: Vec<OutputRect> = wayshot
+        .get_all_outputs()
+        .iter()
+        .map(|o| OutputRect {
+            x: o.logical_region.inner.position.x,
+            y: o.logical_region.inner.position.y,
+            w: o.physical_size.width,
+            h: o.physical_size.height,
+        })
+        .collect();
+
+    let vw = iw.max(1);
+    let vh = ih.max(1);
+    let dimmed = bright.iter().map(|&p| dim(p)).collect();
+
+    Ok(Composite {
+        bright,
+        dimmed,
+        width: vw,
+        height: vh,
+        origin_x: min_x,
+        origin_y: min_y,
+        outputs,
     })
 }

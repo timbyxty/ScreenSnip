@@ -13,7 +13,7 @@ path = "src/main.rs"
 winit = "0.30"
 # Программный рендер замороженного скриншота в окно оверлея
 softbuffer = "0.4"
-# Захват экрана (всех мониторов)
+# Захват экрана (всех мониторов) — X11 / Windows
 xcap = "0.9"
 # Запись изображения в буфер обмена
 arboard = "3.4"
@@ -29,6 +29,10 @@ directories = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
+# CLI-аргументы
+clap = { version = "4", features = ["derive"] }
+# Кодирование PNG (для --output)
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # --- Windows ---
 [target.'cfg(windows)'.dependencies]
@@ -41,6 +45,15 @@ raw-window-handle = "0.6"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Нужен для запуска gtk-цикла, в котором живёт иконка в трее (требование tray-icon)
 gtk = "0.18"
+# Захват экрана на Wayland (wlr-screencopy)
+libwayshot = { version = "0.8", default-features = false }
+# Нативный Wayland-оверлей через layer-shell
+wayland-client = "0.31"
+wayland-backend = "0.3"
+wayland-protocols-wlr = "0.3"
+nix = "0.30"
+memmap2 = "0.9"
+libc = "0.2"
 
 # --- Unix (single-instance через файловую блокировку) ---
 [target.'cfg(unix)'.dependencies]

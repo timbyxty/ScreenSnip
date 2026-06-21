@@ -3,12 +3,15 @@
 
 use std::borrow::Cow;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{CursorIcon, Window, WindowLevel};
+
+use image::ImageEncoder;
 
 use crate::capture::Composite;
 use crate::font;
@@ -28,10 +31,16 @@ pub struct Overlay {
     /// Текущая позиция курсора (в пикселях композита).
     cur: (u32, u32),
     dragging: bool,
+    /// Если задан — сохранить скриншот в файл вместо буфера обмена.
+    save_path: Option<PathBuf>,
 }
 
 impl Overlay {
     pub fn new(event_loop: &ActiveEventLoop, comp: Composite) -> Result<Self> {
+        Self::with_output(event_loop, comp, None)
+    }
+
+    pub fn with_output(event_loop: &ActiveEventLoop, comp: Composite, save_path: Option<PathBuf>) -> Result<Self> {
         // Окно создаём СКРЫТЫМ: сначала отключим анимацию переходов и нарисуем
         // первый кадр, и только потом покажем — чтобы оверлей появлялся мгновенно,
         // без «выезда из центра» и без анимации закрытия.
@@ -70,6 +79,7 @@ impl Overlay {
             start: None,
             cur: (0, 0),
             dragging: false,
+            save_path,
         };
 
         disable_window_transitions(&overlay.window);
@@ -98,20 +108,29 @@ impl Overlay {
         self.window.request_redraw();
     }
 
-    /// Завершение выделения по отпусканию ЛКМ. Если область непустая — копирует
-    /// её в буфер обмена и возвращает true (оверлей нужно закрыть).
+    /// Завершение выделения по отпусканию ЛКМ. Если область непустая — сохраняет
+    /// в файл (если задан save_path) или копирует в буфер обмена.
     pub fn on_left_release(&mut self) -> Result<bool> {
         self.dragging = false;
         let Some((x0, y0, x1, y1)) = self.selection() else {
             return Ok(false);
         };
         let (rgba, w, h) = self.comp.crop_rgba(x0, y0, x1, y1);
-        let mut clipboard = arboard::Clipboard::new()?;
-        clipboard.set_image(arboard::ImageData {
-            width: w as usize,
-            height: h as usize,
-            bytes: Cow::Owned(rgba),
-        })?;
+
+        if let Some(ref path) = self.save_path {
+            let file = std::fs::File::create(path)?;
+            let encoder = image::codecs::png::PngEncoder::new(file);
+            encoder
+                .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+                .map_err(|e| anyhow!("png encode: {e}"))?;
+        } else {
+            let mut clipboard = arboard::Clipboard::new()?;
+            clipboard.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: Cow::Owned(rgba),
+            })?;
+        }
         Ok(true)
     }
 
