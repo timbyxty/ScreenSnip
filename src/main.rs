@@ -9,7 +9,6 @@ mod hotkey_ui;
 mod overlay;
 mod single_instance;
 
-use std::borrow::Cow;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -430,12 +429,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             save_png(path, &rgba, w, h)?;
         }
         if cli.clipboard || cli.output.is_none() {
-            let mut clipboard = arboard::Clipboard::new()?;
-            clipboard.set_image(arboard::ImageData {
-                width: w as usize,
-                height: h as usize,
-                bytes: Cow::Owned(rgba),
-            })?;
+            overlay::copy_image_to_clipboard(&rgba, w, h)?;
         }
         return Ok(());
     }

@@ -2,8 +2,10 @@
 //! прямоугольник мышью и копирует выделенную область в буфер обмена.
 
 use std::borrow::Cow;
+use std::io::Write;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
@@ -124,12 +126,7 @@ impl Overlay {
                 .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
                 .map_err(|e| anyhow!("png encode: {e}"))?;
         } else {
-            let mut clipboard = arboard::Clipboard::new()?;
-            clipboard.set_image(arboard::ImageData {
-                width: w as usize,
-                height: h as usize,
-                bytes: Cow::Owned(rgba),
-            })?;
+            copy_image_to_clipboard(&rgba, w, h)?;
         }
         Ok(true)
     }
@@ -311,4 +308,38 @@ fn put(buf: &mut [u32], stride: usize, x: u32, y: u32, color: u32) {
     if i < buf.len() {
         buf[i] = color;
     }
+}
+
+/// Копирует RGBA в буфер обмена: arboard (X11/Windows), wl-copy (Wayland fallback).
+pub(crate) fn copy_image_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), anyhow::Error> {
+    // Пробуем arboard
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if cb.set_image(arboard::ImageData {
+            width: w as usize,
+            height: h as usize,
+            bytes: Cow::Borrowed(rgba),
+        }).is_ok() {
+            return Ok(());
+        }
+    }
+
+    // Wayland fallback: wl-copy через PNG pipe
+    let mut enc = Vec::new();
+    {
+        let encoder = image::codecs::png::PngEncoder::new(&mut enc);
+        encoder.write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
+            .map_err(|e| anyhow::anyhow!("png encode for wl-copy: {e}"))?;
+    }
+    let mut cmd = Command::new("wl-copy")
+        .arg("--type").arg("image/png")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("wl-copy (needs wl-clipboard): {e}"))?;
+    if let Some(mut stdin) = cmd.stdin.take() {
+        stdin.write_all(&enc).ok();
+    }
+    cmd.wait().ok();
+    Ok(())
 }
