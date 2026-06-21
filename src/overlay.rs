@@ -310,25 +310,35 @@ fn put(buf: &mut [u32], stride: usize, x: u32, y: u32, color: u32) {
     }
 }
 
-/// Копирует RGBA в буфер обмена: arboard (X11/Windows), wl-copy (Wayland fallback).
+/// Копирует RGBA в буфер обмена: arboard (X11/Windows), wl-copy (Wayland).
 pub(crate) fn copy_image_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), anyhow::Error> {
-    // Пробуем arboard
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if cb.set_image(arboard::ImageData {
-            width: w as usize,
-            height: h as usize,
-            bytes: Cow::Borrowed(rgba),
-        }).is_ok() {
-            return Ok(());
-        }
+    // На Wayland arboard может врать что OK — идём сразу в wl-copy
+    #[cfg(target_os = "linux")]
+    if crate::capture::is_wayland() {
+        return copy_via_wlcopy(rgba, w, h);
     }
 
-    // Wayland fallback: wl-copy через PNG pipe
+    // X11 / Windows: арборд
+    match arboard::Clipboard::new() {
+        Ok(mut cb) => {
+            cb.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: Cow::Borrowed(rgba),
+            }).map_err(|e| anyhow::anyhow!("arboard: {e}"))?;
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("arboard: {e}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn copy_via_wlcopy(rgba: &[u8], w: u32, h: u32) -> Result<(), anyhow::Error> {
     let mut enc = Vec::new();
     {
         let encoder = image::codecs::png::PngEncoder::new(&mut enc);
         encoder.write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
-            .map_err(|e| anyhow::anyhow!("png encode for wl-copy: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("png encode: {e}"))?;
     }
     let mut cmd = Command::new("wl-copy")
         .arg("--type").arg("image/png")
@@ -336,10 +346,10 @@ pub(crate) fn copy_image_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(),
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("wl-copy (needs wl-clipboard): {e}"))?;
+        .map_err(|e| anyhow::anyhow!("wl-copy (need wl-clipboard): {e}"))?;
     if let Some(mut stdin) = cmd.stdin.take() {
         stdin.write_all(&enc).ok();
+        drop(stdin);
     }
-    cmd.wait().ok();
     Ok(())
 }
